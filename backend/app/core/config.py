@@ -18,7 +18,7 @@ class Settings(BaseSettings):
 
     # RAG settings
     embedding_model: str = "gemini-embedding-001"
-    llm_model: str = "gemini-2.0-flash"
+    llm_model: str = "gemini-2.5-flash"
     top_k: int = 5
     similarity_threshold: float = 0.5
 
