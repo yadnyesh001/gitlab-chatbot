@@ -13,4 +13,4 @@ services:
       - key: SUPABASE_SERVICE_KEY
         sync: false
       - key: CORS_ORIGINS
-        value: https://your-frontend.vercel.app
+        value: https://gitlab-chatbot-iota.vercel.app
