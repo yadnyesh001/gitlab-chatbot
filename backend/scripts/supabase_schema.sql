@@ -14,19 +14,22 @@ CREATE TABLE IF NOT EXISTS documents (
     url           TEXT NOT NULL,
     title         TEXT NOT NULL,
     chunk_index   INTEGER NOT NULL,
-    embedding     VECTOR(3072),           -- Gemini gemini-embedding-001 = 3072 dims
+    embedding     VECTOR(1024),           -- Cohere embed-english-v3.0 = 1024 dims
     created_at    TIMESTAMPTZ DEFAULT NOW()
 );
 
--- 3. No vector index — exact search is fast for <50K rows
---    (HNSW and IVFFlat both cap at 2000 dims; gemini-embedding-001 = 3072)
+-- 3. Create HNSW index for fast similarity search (1024 dims is under 2000 limit)
+CREATE INDEX IF NOT EXISTS documents_embedding_idx
+ON documents
+USING hnsw (embedding vector_cosine_ops)
+WITH (m = 16, ef_construction = 64);
 
 -- 4. Create index on chunk_id for upserts
 CREATE INDEX IF NOT EXISTS documents_chunk_id_idx ON documents (chunk_id);
 
 -- 5. Create the similarity search function
 CREATE OR REPLACE FUNCTION match_documents(
-    query_embedding VECTOR(3072),
+    query_embedding VECTOR(1024),
     match_count     INT DEFAULT 5,
     match_threshold FLOAT DEFAULT 0.5
 )

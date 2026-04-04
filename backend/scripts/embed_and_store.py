@@ -1,12 +1,10 @@
 """
 Embedding & Indexing Pipeline
 ==============================
-Reads chunks, generates embeddings via Google Gemini,
+Reads chunks, generates embeddings via Cohere,
 and stores them in Supabase (pgvector).
 
-Handles free-tier rate limits:
-  - 100 requests/minute (each text = 1 request)
-  - 1,000 requests/day
+Cohere free tier: 10,000 API calls/month, no daily limit issues.
 
 Usage:
     python embed_and_store.py
@@ -25,40 +23,32 @@ from dotenv import load_dotenv
 # Load .env from the backend/ directory (parent of scripts/)
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
-from google import genai
-from google.genai import errors as genai_errors
+import cohere
 from supabase import create_client, Client
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
 # ── Config ────────────────────────────────────────────────
-EMBEDDING_MODEL = "gemini-embedding-001"
-BATCH_SIZE = 50        # Texts per API call (each text = 1 quota unit)
-DELAY_BETWEEN = 35     # Seconds between batches (50 texts per 35s ≈ 85/min < 100 limit)
-MAX_RETRIES = 3        # Retries per batch on rate limit
-DAILY_BUDGET = 950     # Stop before hitting 1000/day to leave headroom
-
-# Global genai client
-_genai_client = None
+EMBEDDING_MODEL = "embed-english-v3.0"  # 1024 dimensions
+BATCH_SIZE = 96        # Cohere supports up to 96 texts per call
+DELAY_BETWEEN = 1.5    # Seconds between batches
 
 
 def init_clients() -> tuple:
-    """Initialize Google GenAI and Supabase clients."""
-    global _genai_client
-
-    google_api_key = os.environ.get("GOOGLE_API_KEY")
+    """Initialize Cohere and Supabase clients."""
+    cohere_api_key = os.environ.get("COHERE_API_KEY")
     supabase_url = os.environ.get("SUPABASE_URL")
     supabase_key = os.environ.get("SUPABASE_SERVICE_KEY")
 
-    if not all([google_api_key, supabase_url, supabase_key]):
+    if not all([cohere_api_key, supabase_url, supabase_key]):
         raise EnvironmentError(
-            "Set GOOGLE_API_KEY, SUPABASE_URL, and SUPABASE_SERVICE_KEY env vars."
+            "Set COHERE_API_KEY, SUPABASE_URL, and SUPABASE_SERVICE_KEY env vars."
         )
 
-    _genai_client = genai.Client(api_key=google_api_key)
+    co = cohere.Client(api_key=cohere_api_key)
     supabase: Client = create_client(supabase_url, supabase_key)
-    return supabase
+    return co, supabase
 
 
 def load_chunks(path: str = "chunks.json") -> list[dict]:
@@ -68,33 +58,14 @@ def load_chunks(path: str = "chunks.json") -> list[dict]:
     return data
 
 
-def generate_embeddings_with_retry(texts: list[str]) -> list[list[float]] | None:
-    """Generate embeddings with retry. Returns None if daily quota exhausted."""
-    for attempt in range(1, MAX_RETRIES + 1):
-        try:
-            result = _genai_client.models.embed_content(
-                model=EMBEDDING_MODEL,
-                contents=texts,
-            )
-            return [e.values for e in result.embeddings]
-
-        except (genai_errors.ClientError, Exception) as e:
-            error_str = str(e)
-            if "429" not in error_str and "RESOURCE_EXHAUSTED" not in error_str:
-                raise  # Not a rate limit error
-
-            if "PerDay" in error_str:
-                logger.warning("DAILY QUOTA EXHAUSTED. Stopping gracefully.")
-                logger.warning("Re-run this script tomorrow — it will resume automatically.")
-                return None
-
-            # Per-minute limit — wait and retry
-            wait = 65
-            logger.warning(f"Per-minute rate limit (attempt {attempt}/{MAX_RETRIES}). Waiting {wait}s...")
-            time.sleep(wait)
-
-    logger.error("Max retries exceeded for this batch.")
-    return None
+def generate_embeddings(co: cohere.Client, texts: list[str]) -> list[list[float]]:
+    """Generate embeddings using Cohere."""
+    response = co.embed(
+        texts=texts,
+        model=EMBEDDING_MODEL,
+        input_type="search_document",
+    )
+    return response.embeddings
 
 
 def get_existing_chunk_ids(supabase: Client) -> set:
@@ -112,7 +83,7 @@ def get_existing_chunk_ids(supabase: Client) -> set:
 
 def embed_and_store(chunks_path: str = "chunks.json"):
     """Main pipeline: embed chunks and store in Supabase."""
-    supabase = init_clients()
+    co, supabase = init_clients()
     chunks = load_chunks(chunks_path)
 
     # Get existing chunks for resume support
@@ -127,29 +98,23 @@ def embed_and_store(chunks_path: str = "chunks.json"):
         logger.info("All chunks already stored! Nothing to do.")
         return
 
-    logger.info(f"{total_new} new chunks to process (budget: {DAILY_BUDGET} texts/run)")
+    logger.info(f"{total_new} new chunks to process")
 
-    texts_used = 0  # Track daily quota usage
-    stored_this_run = 0
+    stored_count = 0
 
     for i in range(0, total_new, BATCH_SIZE):
         batch = new_chunks[i : i + BATCH_SIZE]
         texts = [c["content"] for c in batch]
 
-        # Check daily budget
-        if texts_used + len(texts) > DAILY_BUDGET:
-            logger.info(f"Approaching daily budget ({texts_used}/{DAILY_BUDGET} used). Stopping.")
-            logger.info("Re-run this script tomorrow to continue.")
-            break
-
         batch_num = i // BATCH_SIZE + 1
-        total_batches = (min(total_new, DAILY_BUDGET) + BATCH_SIZE - 1) // BATCH_SIZE
+        total_batches = (total_new + BATCH_SIZE - 1) // BATCH_SIZE
         logger.info(f"Batch {batch_num}/{total_batches} — embedding {len(texts)} texts...")
 
-        embeddings = generate_embeddings_with_retry(texts)
-
-        if embeddings is None:
-            # Daily quota hit or max retries — stop gracefully
+        try:
+            embeddings = generate_embeddings(co, texts)
+        except Exception as e:
+            logger.error(f"Embedding failed: {e}")
+            logger.info(f"Stored {stored_count} chunks before error. Re-run to continue.")
             break
 
         # Prepare rows for upsert
@@ -167,24 +132,22 @@ def embed_and_store(chunks_path: str = "chunks.json"):
         # Upsert into Supabase
         supabase.table("documents").upsert(rows, on_conflict="chunk_id").execute()
 
-        texts_used += len(texts)
-        stored_this_run += len(rows)
-        total_stored = len(existing_ids) + stored_this_run
+        stored_count += len(rows)
+        total_stored = len(existing_ids) + stored_count
 
-        logger.info(f"Stored {len(rows)} rows | This run: {stored_this_run} | Total in DB: {total_stored} | Quota used: {texts_used}/{DAILY_BUDGET}")
+        logger.info(f"Stored {len(rows)} rows | This run: {stored_count} | Total in DB: {total_stored}")
 
-        # Wait between batches to stay under per-minute limit
+        # Small delay between batches
         if i + BATCH_SIZE < total_new:
-            logger.info(f"Waiting {DELAY_BETWEEN}s before next batch...")
             time.sleep(DELAY_BETWEEN)
 
     logger.info(f"\n{'='*50}")
     logger.info(f"Run complete!")
-    logger.info(f"Stored this run: {stored_this_run}")
-    logger.info(f"Total in DB: {len(existing_ids) + stored_this_run}")
-    logger.info(f"Remaining: {total_new - stored_this_run}")
-    if total_new - stored_this_run > 0:
-        logger.info(f"Run this script again tomorrow to process more.")
+    logger.info(f"Stored this run: {stored_count}")
+    logger.info(f"Total in DB: {len(existing_ids) + stored_count}")
+    remaining = total_new - stored_count
+    if remaining > 0:
+        logger.info(f"Remaining: {remaining} — re-run to continue.")
     else:
         logger.info(f"All chunks processed!")
     logger.info(f"{'='*50}")

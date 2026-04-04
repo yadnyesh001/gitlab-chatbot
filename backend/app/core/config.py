@@ -9,15 +9,18 @@ from functools import lru_cache
 
 
 class Settings(BaseSettings):
-    # Google Gemini
+    # Google Gemini (for LLM)
     google_api_key: str
+
+    # Cohere (for embeddings)
+    cohere_api_key: str
 
     # Supabase
     supabase_url: str
     supabase_service_key: str
 
     # RAG settings
-    embedding_model: str = "gemini-embedding-001"
+    embedding_model: str = "embed-english-v3.0"
     llm_model: str = "gemini-2.5-flash"
     top_k: int = 5
     similarity_threshold: float = 0.5

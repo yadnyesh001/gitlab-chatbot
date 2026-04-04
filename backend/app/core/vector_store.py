@@ -1,21 +1,21 @@
 """
 Vector Store — Supabase pgvector Integration
 =============================================
-Handles embedding queries and retrieving similar documents.
+Handles embedding queries (via Cohere) and retrieving similar documents.
 """
 
 import logging
-import time
+import cohere
 
-from google import genai
 from supabase import create_client, Client
-
 from app.core.config import get_settings
 
 logger = logging.getLogger(__name__)
 
 _supabase_client: Client | None = None
-_genai_client = None
+_cohere_client = None
+
+EMBEDDING_MODEL = "embed-english-v3.0"  # 1024 dimensions
 
 
 def get_supabase() -> Client:
@@ -27,36 +27,35 @@ def get_supabase() -> Client:
     return _supabase_client
 
 
-def get_genai_client():
-    """Get or create Google GenAI client (singleton)."""
-    global _genai_client
-    if _genai_client is None:
+def get_cohere_client():
+    """Get or create Cohere client (singleton)."""
+    global _cohere_client
+    if _cohere_client is None:
         settings = get_settings()
-        _genai_client = genai.Client(api_key=settings.google_api_key)
-    return _genai_client
+        _cohere_client = cohere.Client(api_key=settings.cohere_api_key)
+    return _cohere_client
 
 
 def embed_query(text: str) -> list[float]:
-    """Generate embedding for a user query with retry on rate limit."""
-    settings = get_settings()
-    client = get_genai_client()
+    """Generate embedding for a user query using Cohere."""
+    client = get_cohere_client()
+    response = client.embed(
+        texts=[text],
+        model=EMBEDDING_MODEL,
+        input_type="search_query",
+    )
+    return response.embeddings[0]
 
-    for attempt in range(3):
-        try:
-            result = client.models.embed_content(
-                model=settings.embedding_model,
-                contents=text,
-            )
-            return result.embeddings[0].values
-        except Exception as e:
-            if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
-                wait = 15 * (attempt + 1)
-                logger.warning(f"Embedding rate limited, waiting {wait}s (attempt {attempt+1}/3)")
-                time.sleep(wait)
-            else:
-                raise
 
-    raise RuntimeError("Embedding failed after 3 retries due to rate limiting.")
+def embed_documents(texts: list[str]) -> list[list[float]]:
+    """Generate embeddings for documents using Cohere."""
+    client = get_cohere_client()
+    response = client.embed(
+        texts=texts,
+        model=EMBEDDING_MODEL,
+        input_type="search_document",
+    )
+    return response.embeddings
 
 
 def search_documents(query: str, top_k: int | None = None) -> list[dict]:
