@@ -68,7 +68,7 @@ async def chat(request: ChatRequest):
         )
     except Exception as e:
         logger.error(f"Error processing question: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to process your question. Please try again.")
 
 
 @router.get("/health", response_model=HealthResponse)
@@ -86,16 +86,3 @@ async def health():
 async def suggested_questions():
     """Return suggested questions for new users."""
     return {"questions": SUGGESTED_QUESTIONS}
-
-
-@router.get("/debug")
-async def debug():
-    """Debug endpoint — check if env vars are loaded."""
-    import os
-    return {
-        "google_api_key_set": bool(os.environ.get("GOOGLE_API_KEY")),
-        "supabase_url_set": bool(os.environ.get("SUPABASE_URL")),
-        "supabase_key_set": bool(os.environ.get("SUPABASE_SERVICE_KEY")),
-        "google_key_prefix": (os.environ.get("GOOGLE_API_KEY") or "")[:8] + "...",
-        "supabase_url": os.environ.get("SUPABASE_URL", "NOT SET"),
-    }

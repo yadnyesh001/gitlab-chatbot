@@ -31,8 +31,8 @@ logger = logging.getLogger(__name__)
 
 # ── Config ────────────────────────────────────────────────
 EMBEDDING_MODEL = "embed-english-v3.0"  # 1024 dimensions
-BATCH_SIZE = 96        # Cohere supports up to 96 texts per call
-DELAY_BETWEEN = 1.5    # Seconds between batches
+BATCH_SIZE = 50        # Smaller batches to stay under 100K tokens/min
+DELAY_BETWEEN = 8      # Seconds between batches (~6 batches/min × ~15K tokens = ~90K/min)
 
 
 def init_clients() -> tuple:
