@@ -5,6 +5,7 @@ Handles embedding queries and retrieving similar documents.
 """
 
 import logging
+import time
 
 from google import genai
 from supabase import create_client, Client
@@ -36,15 +37,26 @@ def get_genai_client():
 
 
 def embed_query(text: str) -> list[float]:
-    """Generate embedding for a user query."""
+    """Generate embedding for a user query with retry on rate limit."""
     settings = get_settings()
     client = get_genai_client()
 
-    result = client.models.embed_content(
-        model=settings.embedding_model,
-        contents=text,
-    )
-    return result.embeddings[0].values
+    for attempt in range(3):
+        try:
+            result = client.models.embed_content(
+                model=settings.embedding_model,
+                contents=text,
+            )
+            return result.embeddings[0].values
+        except Exception as e:
+            if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
+                wait = 15 * (attempt + 1)
+                logger.warning(f"Embedding rate limited, waiting {wait}s (attempt {attempt+1}/3)")
+                time.sleep(wait)
+            else:
+                raise
+
+    raise RuntimeError("Embedding failed after 3 retries due to rate limiting.")
 
 
 def search_documents(query: str, top_k: int | None = None) -> list[dict]:
